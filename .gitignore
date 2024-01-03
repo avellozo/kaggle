@@ -1,2 +1,2 @@
-Learn/IntrotoMachineLearning/mlruns/*
-Learn/IntrotoMachineLearning/submission.csv
+mlruns/
+**/submission.csv
