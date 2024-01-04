@@ -1,2 +1,3 @@
 mlruns/
 **/submission.csv
+.vscode/settings.json
