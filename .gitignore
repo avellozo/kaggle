@@ -1,3 +1,6 @@
 mlruns/
 **/submission.csv
 .vscode/settings.json
+.venv/
+.venv_pytorch/
+cibmtr/__pycache__/
