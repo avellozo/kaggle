@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.calibration import LabelEncoder
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import FunctionTransformer, Pipeline
 
 from cibmtr.tools import basic_treat_missing_numbers_booleans, col_is_bool, convert_object_columns_to_categorical, convert_to_bool, fix_bol_type, ohe_catCols
 
@@ -334,6 +334,26 @@ class DataFrameMinMaxScaler(BaseEstimator, TransformerMixin):
         X_scaled[self.numeric_cols] = self.scaler.transform(X[self.numeric_cols])
 
         return X_scaled
+
+class mapTransformer(BaseEstimator, TransformerMixin):
+    """Aplica mapeamentos para conversão."""
+    def __init__(self, mappings):
+        self.mappings = mappings
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+        for col, mapping in self.mappings.items():
+            X[col] = X[col].replace(mapping)
+        return X
+
+# Mapeamentos para conversão
+# mappings = {
+#     'Cidade': {'SP': 0, 'RJ': 1, 'MG': 2},
+#     'Grau': {'Baixo': 0, 'Médio': 1, 'Alto': 2}
+# }
 
 # -------------------------------
 # CRIAÇÃO DO PIPELINE

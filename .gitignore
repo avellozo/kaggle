@@ -4,3 +4,5 @@ mlruns/
 .venv/
 .venv_pytorch/
 cibmtr/__pycache__/
+cibmtr/external/lightning_logs/*
+*/sandbox/*
