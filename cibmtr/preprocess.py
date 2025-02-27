@@ -101,6 +101,41 @@ class ConvertObjectToCategoricalTransformer(BaseEstimator, TransformerMixin):
             df[column] = df[column].astype('category')
         return df
 
+class BooleanConverterTransformer(BaseEstimator, TransformerMixin):
+    """Converte colunas object e categorical com dois valores únicos (e missings) para booleanas,
+       mantendo missings como missings."""
+
+    def fit(self, X, y=None):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        self.value_map_ = {}
+        self.new_column_names_ = {}
+
+        for col in X.columns:
+            if X[col].dtype == 'object' or pd.api.types.is_categorical_dtype(X[col]):
+                value_counts = X[col].value_counts(dropna=True)
+                if len(value_counts) == 2:
+                    most_frequent = value_counts.index[0]
+                    least_frequent = value_counts.index[1]
+                    self.value_map_[col] = {most_frequent: False, least_frequent: True} # Valor menos frequente para True
+                    self.new_column_names_[col] = f"{col}_{least_frequent}"
+                elif len(value_counts) == 1:  # Adiciona tratamento para um único valor
+                    valor_unico = value_counts.index[0]
+                    self.value_map_[col] = {valor_unico: True}  # Ou outro tratamento
+                    self.new_column_names_[col] = f"{col}_{valor_unico}"
+        return self
+
+    def transform(self, X):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        X = X.copy()
+
+        for col, mapping in self.value_map_.items():
+            X[col] = X[col].map(mapping) # Aplica o mapeamento
+            X[col] = X[col].astype('boolean')
+            # Valores não mapeados (incluindo NaN) permanecem como NaN
+        X = X.rename(columns=self.new_column_names_)
+        return X
 class OneHotEncodeCategoricalTransformer(BaseEstimator, TransformerMixin):
     """
     Transformer que aplica One-Hot Encoding para colunas categóricas com mais de 2 categorias
@@ -182,10 +217,14 @@ class DropHighCorrelationColumnsTransformer(BaseEstimator, TransformerMixin):
         # Garante que X seja um DataFrame
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X)
-        df = X
+        df = X.copy()
         
-        # Calcular a matriz de correlação absoluta
-        correlation_matrix = df.drop(columns=self.undrop_cols).corr().abs()
+        # Seleciona apenas as colunas numéricas
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        df_numeric = df[numeric_cols]
+
+        # Calcula a matriz de correlação apenas para as colunas numéricas
+        correlation_matrix = df_numeric.drop(columns=self.undrop_cols).corr().abs()
 
         # Obter apenas o triângulo superior da matriz de correlação para evitar duplicatas
         upper_triangle = correlation_matrix.where(
@@ -290,7 +329,8 @@ class TreatMissingValuesTransformer(BaseEstimator, TransformerMixin):
             elif pd.api.types.is_categorical_dtype(X[col]):
                 # Para colunas categóricas, preenche com a moda
                 self.fill_values_[col] = X[col].mode()[0]
-            # Outras colunas não são tratadas, mas você pode incluir outras regras se necessário.
+            # Outras colunas devem ser tratadas
+            
         return self
 
     def transform(self, X):
@@ -301,7 +341,48 @@ class TreatMissingValuesTransformer(BaseEstimator, TransformerMixin):
         X_transformed = X.copy()
         for col, fill_val in self.fill_values_.items():
             if col in X_transformed.columns:
+                if pd.api.types.is_categorical_dtype(X_transformed[col]):
+                    if fill_val not in X_transformed[col].cat.categories:
+                        X_transformed[col] = X_transformed[col].cat.add_categories(fill_val)
                 X_transformed[col] = X_transformed[col].fillna(fill_val)
+        return X_transformed
+
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import LabelEncoder
+
+class LabelEncoderTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, columns_to_encode=None):
+        self.le_dict = {}
+        self.columns_to_encode = columns_to_encode  # Especifica colunas a serem transformadas
+
+    def fit(self, X, y=None):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+
+        # Determina as colunas a serem codificadas (se não forem especificadas, usa todas categóricas)
+        cols_to_fit = self.columns_to_encode if self.columns_to_encode else X.select_dtypes(include=['object', 'category']).columns
+
+        for col in cols_to_fit:
+            le = LabelEncoder()
+            le.fit(X[col])
+            self.le_dict[col] = le
+
+        return self
+
+    def transform(self, X):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+
+        X_transformed = X.copy()
+
+        for col, enc in self.le_dict.items():
+            if col in X_transformed.columns:
+                # unknown_mask = ~X_transformed[col].isin(enc.classes_)
+                # X_transformed[col] = X_transformed[col].map(lambda x: enc.transform([x])[0] if x in enc.classes_ else -1)
+                X_transformed[col] = enc.transform(X_transformed[col])
+                X_transformed[col] = X_transformed[col].astype('category')  # Converte de volta para categoria
+        
         return X_transformed
 
 class DataFrameMinMaxScaler(BaseEstimator, TransformerMixin):
@@ -347,13 +428,81 @@ class mapTransformer(BaseEstimator, TransformerMixin):
         X = X.copy()
         for col, mapping in self.mappings.items():
             X[col] = X[col].replace(mapping)
+            X[col] = pd.to_numeric(X[col], errors='raise')
         return X
 
-# Mapeamentos para conversão
-# mappings = {
-#     'Cidade': {'SP': 0, 'RJ': 1, 'MG': 2},
-#     'Grau': {'Baixo': 0, 'Médio': 1, 'Alto': 2}
-# }
+class BitSplitterTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, coluna, n_bits):
+        """
+        Parâmetros:
+        - coluna: nome da coluna que contém os números inteiros.
+        - n_bits: número de bits que serão extraídos (padrão: 4).
+        """
+        self.coluna = coluna
+        self.n_bits = n_bits
+        
+    def fit(self, X, y=None):
+        # Nenhum ajuste é necessário, apenas retorna self.
+        return self
+
+    def transform(self, X):
+        # Cria uma cópia do DataFrame para não modificar o original
+        X = X.copy()
+        
+        if self.coluna not in X.columns:
+            raise ValueError(f"A coluna '{self.coluna}' não foi encontrada no DataFrame.")
+        
+        # Converte cada valor na coluna para sua representação binária com n_bits de largura
+        def num_to_bits(x):
+            # Converte o valor para inteiro, formata com zeros à esquerda e retorna uma lista de inteiros
+            return [int(bit) for bit in format(int(x), f'0{self.n_bits}b')]
+        
+        # Aplica a função para cada valor da coluna
+        bits_lista = X[self.coluna].apply(num_to_bits).tolist()
+        
+        # Cria um DataFrame com as novas colunas de bits
+        colunas_bits = [f"{self.coluna}_bit_{i}" for i in range(self.n_bits)]
+        df_bits = pd.DataFrame(bits_lista, columns=colunas_bits, index=X.index)
+        
+        # Remove a coluna original e concatena com as novas colunas de bits
+        X = X.drop(columns=[self.coluna])
+        X = pd.concat([X, df_bits], axis=1)
+        
+        return X
+
+class SexSplitterTransformer(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X['sex_donor_male'] = np.nan
+        X['sex_receiver_male'] = np.nan
+        
+        # Aplicando a lógica apenas onde 'cmv_status' não é NaN
+        mask = X['sex_match'].notna()
+        
+        # Atribuindo valores apenas para linhas não-NaN
+        X.loc[mask, 'sex_donor_male'] = (X.loc[mask, 'sex_match'].str[0] == 'M')
+        X.loc[mask, 'sex_receiver_male'] = (X.loc[mask, 'sex_match'].str[2] == 'M')
+        
+        return X
+
+class CMVSplitterTransformer(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X['cmv_donor_positive'] = np.nan
+        X['cmv_receiver_positive'] = np.nan
+        
+        # Aplicando a lógica apenas onde 'cmv_status' não é NaN
+        mask = X['cmv_status'].notna()
+        
+        # Atribuindo valores apenas para linhas não-NaN
+        X.loc[mask, 'cmv_donor_positive'] = (X.loc[mask, 'cmv_status'].str[0] == '+')
+        X.loc[mask, 'cmv_receiver_positive'] = (X.loc[mask, 'cmv_status'].str[2] == '+')
+        
+        return X
 
 # -------------------------------
 # CRIAÇÃO DO PIPELINE

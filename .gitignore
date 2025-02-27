@@ -6,3 +6,4 @@ mlruns/
 cibmtr/__pycache__/
 cibmtr/external/lightning_logs/*
 */sandbox/*
+lightning_logs/*
