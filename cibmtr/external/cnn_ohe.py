@@ -1,3 +1,4 @@
+import itertools
 import os
 import sys
 import numpy as np
@@ -222,10 +223,11 @@ class LitNN(pl.LightningModule):
         x, y, efs, race_series = batch
         y_hat = self(x)
         loss = self.get_loss(efs, race_series, y, y_hat)
-        self.log("train_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        loss_cindex = self.get_loss_concordance(efs, race_series, y, y_hat)
+        self.log("train_loss", loss_cindex, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
-    def get_loss(self, efs, race_group_series, y, y_hat):
+    def get_loss_concordance(self, efs, race_group_series, y, y_hat):
         """
         Calculate loss for each race_group based on deviation/variance.
         """
@@ -233,7 +235,7 @@ class LitNN(pl.LightningModule):
         scores = []
         for race in races:
             ind = (race_group_series == race).nonzero(as_tuple=True)[0]  # Indexação correta
-            scores.append(self.calcule_score(y[ind], y_hat[ind], efs[ind]))
+            scores.append(self.calcule_score_cindex(y[ind], y_hat[ind], efs[ind]))
         # Converte scores para tensor e força requires_grad=True se necessário
         scores_tensor = torch.tensor(scores, dtype=torch.float32, device=y_hat.device)
         if not scores_tensor.requires_grad:
@@ -243,7 +245,7 @@ class LitNN(pl.LightningModule):
 
         return score_total 
 
-    def calcule_score(self, y, y_hat, efs):
+    def calcule_score_cindex(self, y, y_hat, efs):
         """
         Most important part of the model : loss function used for training.
         We face survival data with event indicators along with time-to-event.
@@ -258,6 +260,108 @@ class LitNN(pl.LightningModule):
         """
 
         return concordance_index(y.cpu().detach().numpy(), -y_hat.cpu().detach().numpy(), efs.cpu().detach().numpy())
+
+    def get_loss(self, efs, race_group_series, y, y_hat):
+        """
+        Calculate pairwise ranking loss for each race group.
+        """
+        races = torch.unique(race_group_series)
+        losses = []
+        for race in races:
+            ind = (race_group_series == race).nonzero(as_tuple=True)[0]
+            # losses.append(self.hinge_loss(y[ind], y_hat[ind], efs[ind]))
+            losses.append(self.listmle_loss(y[ind], y_hat[ind]))
+
+        loss_tensor = torch.tensor(losses, dtype=torch.float32, device=y_hat.device)
+        
+        if not loss_tensor.requires_grad:
+            loss_tensor.requires_grad_(True)
+
+        return torch.mean(loss_tensor)  # Retorna a média da loss entre os grupos
+
+    def hinge_loss(self, y, y_hat, efs):
+        """
+        Compute a pairwise hinge loss efficiently using matrix operations.
+        """
+
+        # Criamos uma matriz com todas as diferenças entre os tempos reais
+        y_diff = y[:, None] - y[None, :]  # Matriz NxN
+        y_hat_diff = y_hat[:, None] - y_hat[None, :]  # Matriz NxN
+
+        # Criamos uma máscara que seleciona apenas os pares válidos
+        valid_pairs = (efs[:, None] == 1) | (efs[None, :] == 1)  # Pelo menos um evento
+
+        # Selecionamos pares onde y_i > y_j (ou seja, y_diff > 0)
+        ranking_mask = y_diff > 0
+
+        # Aplicamos a hinge loss apenas nos pares válidos
+        loss_matrix = torch.relu(1 - y_hat_diff) * (ranking_mask & valid_pairs)
+
+        # Retornamos a média apenas dos pares válidos
+        count = valid_pairs.sum()  
+        return loss_matrix.sum() / count if count > 0 else torch.tensor(0.0, device=y.device)
+    
+    def spearman_loss(self, y, y_hat):
+        """
+        Spearman's rank correlation loss.
+        Penaliza discrepâncias na ordem relativa entre y e y_hat.
+        """
+        y_rank = torch.argsort(torch.argsort(y))
+        y_hat_rank = torch.argsort(torch.argsort(y_hat))
+
+        # Normalizar os rankings
+        y_rank = (y_rank - y_rank.float().mean()) / y_rank.float().std()
+        y_hat_rank = (y_hat_rank - y_hat_rank.float().mean()) / y_hat_rank.float().std()
+
+        # Retornar a correlação negativa como loss (queremos maximizá-la)
+        return -torch.mean(y_rank * y_hat_rank)
+
+    def listmle_loss(self, y, y_hat):
+        """
+        Implementação do ListMLE (Listwise Learning to Rank Loss).
+        Garante que o ranking dos escores esteja na mesma ordem do ranking verdadeiro.
+        """
+        # Ordenar os valores reais (y) e pegar os índices da ordenação
+        _, indices = torch.sort(y, descending=True)
+
+        # Ordenar os valores preditos conforme a ordem real de y
+        y_hat_sorted = y_hat[indices]
+
+        # Aplicar softmax nos escores ordenados e calcular log-probabilidade
+        loss = -torch.sum(torch.log(torch.softmax(y_hat_sorted, dim=0)))
+        return loss
+
+    def calcule_score_hinge_old(self, y, y_hat, efs):
+        """
+        Compute a pairwise hinge loss to enforce correct ranking.
+
+        We create all possible pairs (i, j) where at least one of them has an event.
+        The loss ensures that if y_i > y_j (i.e., event for i happened later than j), 
+        then the predicted y_hat_i should also be greater than y_hat_j.
+        """
+
+        # Criar todas as combinações possíveis de pares
+        pairs = list(itertools.combinations(range(len(y)), 2))
+
+        loss = 0.0
+        count = 0
+
+        for i, j in pairs:
+            if efs[i] == 1 or efs[j] == 1:  # Apenas pares onde pelo menos um evento aconteceu
+                yi, yj = y[i], y[j]
+                si, sj = y_hat[i], y_hat[j]
+
+                if yi > yj:  # i deveria ter score maior que j
+                    loss += torch.relu(1 - (si - sj))
+                    count += 1
+                elif yi < yj:  # j deveria ter score maior que i
+                    loss += torch.relu(1 - (sj - si))
+                    count += 1
+
+        if count > 0:
+            loss /= count  # Média sobre os pares válidos
+
+        return loss
 
     def validation_step(self, batch, batch_idx):
         """
@@ -291,8 +395,9 @@ class LitNN(pl.LightningModule):
         x, y, efs, race_series = batch
         y_hat = self(x)
         loss = self.get_loss(efs, race_series, y, y_hat)
+        loss_cindex = self.get_loss_concordance(efs, race_series, y, y_hat)
         self.targets.append([y, y_hat.detach(), efs, race_series])
-        self.log("test_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        self.log("test_loss", loss_cindex, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def on_test_epoch_end(self) -> None:
@@ -303,7 +408,7 @@ class LitNN(pl.LightningModule):
         y_hat = torch.cat([t[1] for t in self.targets])
         efs = torch.cat([t[2] for t in self.targets])
         race_series = torch.cat([t[3] for t in self.targets])
-        val_score = self.get_loss(efs, race_series, y, y_hat)
+        val_score = self.get_loss_concordance(efs, race_series, y, y_hat)
         self.log("test_val_loss", val_score, on_epoch=True, prog_bar=True, logger=True)
         
         self.targets.clear()
@@ -396,7 +501,6 @@ def main(hparams):
         tt = train_original.copy()
         train = tt.iloc[train_index]
         val = tt.iloc[test_index]
-        
         
         train_preprocessed = preprocessing_pipeline.fit_transform(train)
         val_preprocessed = preprocessing_pipeline.transform(val)
